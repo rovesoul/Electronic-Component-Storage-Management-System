@@ -1,7 +1,7 @@
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
-import os, shutil, time
+import os, shutil, time,sys
 import platform
 import subprocess
 from PIL import Image, ImageTk
@@ -23,7 +23,7 @@ jsonFile=load_json()
 if 'types' in jsonFile and isinstance(jsonFile['types'], dict):
     types = list(jsonFile['types'].keys())
     packages=jsonFile['package']
-    print(packages)
+    # print(packages)
 else:
     types = ['其他']
     packages=['其他']
@@ -73,7 +73,7 @@ class ZoomImageViewer(tk.Toplevel):
         self.original_img = Image.open(img_path)
         self.zoom_level = 1.0
 
-        # 让窗口80%全屏
+        # 窗口居中初始化
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         w = int(sw * 0.9)
@@ -81,7 +81,7 @@ class ZoomImageViewer(tk.Toplevel):
         self.geometry(f"{w}x{h}+{int((sw-w)/2)}+{int((sh-h)/2)}")
         self.resizable(True, True)
 
-        self.canvas = tk.Canvas(self, bg='gray')
+        self.canvas = tk.Canvas(self, bg='black')
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.h_scroll = tk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.canvas.xview)
         self.h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
@@ -89,18 +89,19 @@ class ZoomImageViewer(tk.Toplevel):
         self.v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.config(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
-        self.canvas.bind('<MouseWheel>', self._on_mousewheel)
-        self.canvas.bind('<Button-4>', self._on_mousewheel)
-        self.canvas.bind('<Button-5>', self._on_mousewheel)
+        # 鼠标事件绑定
+        self.canvas.bind('<MouseWheel>', self._on_mousewheel)     # windows
+        self.canvas.bind('<Button-4>', self._on_mousewheel)       # linux
+        self.canvas.bind('<Button-5>', self._on_mousewheel)       # linux
         self.canvas.bind('<ButtonPress-1>', self._on_press)
         self.canvas.bind('<B1-Motion>', self._on_drag)
 
-        self.last_x = None
-        self.last_y = None
+        self._zoom_job = None
+        self._img_pos = (0, 0)   # 记录当前图像位置，便于精确缩放
 
         self.bind("<Configure>", lambda e: self.reset_image_fit())
         self.fit_once = False
-        self.after(100, self.reset_image_fit)
+        self.after(15, self.reset_image_fit)
 
     def reset_image_fit(self):
         if self.fit_once: return
@@ -109,45 +110,114 @@ class ZoomImageViewer(tk.Toplevel):
         img_w, img_h = self.original_img.size
         factor = min(win_w / img_w, win_h / img_h, 1.0)
         self.zoom_level = factor
-        self.show_image()
+        self.show_image(center=True)
         self.fit_once = True
 
     def _on_mousewheel(self, event):
-        if event.num == 5 or getattr(event, 'delta', 0) < 0:
-            self.zoom_level /= 1.1
-        elif event.num == 4 or getattr(event, 'delta', 0) > 0:
-            self.zoom_level *= 1.1
-        self.zoom_level = max(0.1, min(self.zoom_level, 10))
-        self.show_image(center=True)
+        if event.num == 5 or getattr(event, "delta", 0) < 0:
+            factor = 1 / 1.1
+        elif event.num == 4 or getattr(event, "delta", 0) > 0:
+            factor = 1.1
+        else:
+            return
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        img_x = x / self.zoom_level
+        img_y = y / self.zoom_level
+
+        # 记住canvas上的本地像素
+        self._last_canvas_xy = (event.x, event.y)
+        
+        new_zoom = self.zoom_level * factor
+        new_zoom = max(0.1, min(new_zoom, 10))
+        if self._zoom_job is not None:
+            self.after_cancel(self._zoom_job)
+        self._zoom_job = self.after(
+            1,
+            lambda: self._zoom_to(img_x, img_y, new_zoom, (event.x, event.y))  # 新增canvas像素位置
+        )
+
+    def _zoom_to(self, img_x, img_y, new_zoom, last_canvas_xy):
+        self.zoom_level = new_zoom
+        self._last_canvas_xy = last_canvas_xy  # 传到show_image用
+        self.show_image(zoom_at=(img_x, img_y))
 
     def _on_press(self, event):
-        self.last_x = event.x
-        self.last_y = event.y
+        self.canvas.scan_mark(event.x, event.y)
 
     def _on_drag(self, event):
-        dx = event.x - self.last_x
-        dy = event.y - self.last_y
-        self.canvas.xview_scroll(-int(dx), "units")
-        self.canvas.yview_scroll(-int(dy), "units")
-        self.last_x = event.x
-        self.last_y = event.y
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
 
-    def show_image(self, center=False):
+    def show_image(self, center=False, center_coord=None, zoom_at=None):
+        '''
+        :param center: 是否居中
+        :param center_coord: 兼容保留
+        :param zoom_at: (img_x, img_y) 以原图的某点（如鼠标落点）为缩放参考
+        '''
         img = self.original_img.resize(
-            (max(1,int(self.original_img.width * self.zoom_level)), max(1,int(self.original_img.height * self.zoom_level))),
-            Image.ANTIALIAS)
+            (max(1, int(self.original_img.width * self.zoom_level)),
+             max(1, int(self.original_img.height * self.zoom_level))),
+            Image.LANCZOS)
         self.tkimg = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
         self.img_on_canvas = self.canvas.create_image(0, 0, anchor='nw', image=self.tkimg)
         self.canvas.config(scrollregion=(0, 0, img.width, img.height))
-        if center:
-            c_width = self.canvas.winfo_width()
-            c_height = self.canvas.winfo_height()
-            self.canvas.xview_moveto(max(0, (img.width - c_width) / 2 / img.width))
-            self.canvas.yview_moveto(max(0, (img.height - c_height) / 2 / img.height))
+
+        c_w = self.canvas.winfo_width()
+        c_h = self.canvas.winfo_height()
+
+        if zoom_at is not None:
+                # 保证鼠标下的点缩放后仍停留在光标处
+            img_x, img_y = zoom_at           # 鼠标对应原图坐标
+            c_w = self.canvas.winfo_width()
+            c_h = self.canvas.winfo_height()
+            
+            # 1. 缩放后该点的画布坐标:
+            x_canvas_new = img_x * self.zoom_level
+            y_canvas_new = img_y * self.zoom_level
+            
+            # 2. 缩放前该点在画布上的像素
+            # 注意，这里的 canvas_x,canvas_y 就是 `event.x,event.y` 传进来的! 
+            # 但 show_image 里没传，要在 _zoom_to 方法里一并传进去
+            
+            # 3. 当前scroll范围
+            img_w, img_h = img.width, img.height
+
+            # 4. 设置view，使鼠标点矫正后和画布位置重合
+            # 目标: 缩放后的img_x * zoom_level必须和缩放前鼠标所在canvas像素对齐
+            # 但show_image里拿不到event.x, event.y，怎么办？让_zoom_to多传入这个信息
+            if hasattr(self, "_last_canvas_xy"):
+                canvas_x, canvas_y = self._last_canvas_xy
+                # 这两个的范围都是canvas视区内像素
+                # xview_moveto/yview_moveto参数是fraction，不是像素
+                self.canvas.xview_moveto( (x_canvas_new - canvas_x) / max(1, img_w) )
+                self.canvas.yview_moveto( (y_canvas_new - canvas_y) / max(1, img_h) )
+        elif center_coord is not None:
+            # 老参数，兼容
+            cx, cy = center_coord
+            img_w, img_h = img.width, img.height
+            new_x = cx / img_w if img_w else 0
+            new_y = cy / img_h if img_h else 0
+            self.canvas.xview_moveto(max(0, new_x - c_w/(2*img_w)))
+            self.canvas.yview_moveto(max(0, new_y - c_h/(2*img_h)))
+        elif center:
+            # 首次居中
+            self.canvas.xview_moveto(max(0, (img.width - c_w) / 2 / img.width))
+            self.canvas.yview_moveto(max(0, (img.height - c_h) / 2 / img.height))
+
+
 
 root = tk.Tk()
 root.title('电子元器件管理Electronic Component Storage Management System')
+
+try:
+    logo_img = Image.open(os.path.join('src', 'sysimg', 'logo.png'))
+    logo_tk = ImageTk.PhotoImage(logo_img)
+    root.iconphoto(True, logo_tk)
+except Exception as e:
+    print("Logo加载失败:", e, file=sys.stderr)
+
+
 dbapi.init_db()
 
 # 屏幕80%尺寸
@@ -407,12 +477,15 @@ hscroll.config(command=tree.xview)
 
 def on_right_click(event):
     iid = tree.identify_row(event.y)
+    print('right click: iid:', iid)
     if iid:
         tree.selection_set(iid)
         menu = tk.Menu(root, tearoff=0)
         menu.add_command(label="删除", command=on_delete_record)
         menu.post(event.x_root, event.y_root)
-tree.bind("<Button-3>", on_right_click)
+tree.bind("<Button-3>", on_right_click)              # 右键菜单主流
+tree.bind("<Button-2>", on_right_click)              # 某些X11环境鼠标右键
+tree.bind("<Control-Button-1>", on_right_click)      # Mac下的“Ctrl+单击”当作右键
 
 def on_delete_record():
     selected = tree.selection()
@@ -581,7 +654,7 @@ def refresh_tree(tree, rows=None):
         tree.insert('', 'end', values=(id_, name, model,package, qty, total_price, unit_price, note, brief_path(img), brief_path(doc), cloud if cloud else ""))
 
 def on_tree_select(event=None):
-    img_preview_label.config(image='', text='无图片', width=32, height=16, cursor="")
+    img_preview_label.config(image='', text='', width=32, height=16, cursor="")
     open_doc_button.config(state='disabled', text="打开文档", command=lambda: None)
     open_cloud_button.config(state='disabled', text="打开云端文档", command=lambda: None)
     selected = tree.selection()
@@ -598,16 +671,27 @@ def on_tree_select(event=None):
 
     if img_path and os.path.isfile(img_path):
         try:
+            target_w, target_h = 256, 256
             img = Image.open(img_path)
-            img.thumbnail((256, 256))
+            # 填充并居中裁剪
+            iw, ih = img.size
+            rate_w = target_w / iw
+            rate_h = target_h / ih
+            rate = max(rate_w, rate_h)
+            nsize = (int(iw * rate), int(ih * rate))
+            img = img.resize(nsize, Image.LANCZOS)
+
+            x1 = (img.width - target_w) // 2
+            y1 = (img.height - target_h) // 2
+            img = img.crop((x1, y1, x1 + target_w, y1 + target_h))
+
             tkimg = ImageTk.PhotoImage(img)
             img_preview_label.image = tkimg
-            img_preview_label.config(image=tkimg, text='(点击放大)', width=256, height=256, cursor="hand2")
+            img_preview_label.config(image=tkimg, text='(点击放大)', width=target_w, height=target_h, cursor="hand2")
         except Exception as e:
             img_preview_label.config(image='', text='图片读取失败', width=32, height=16, cursor="")
     else:
         img_preview_label.config(image='', text='无图片', width=32, height=16, cursor="")
-
     if doc_path and os.path.isfile(doc_path):
         open_doc_button.config(
             state='normal',
