@@ -9,9 +9,18 @@ import webbrowser
 import json
 import dbapi
 
+def resource_path(relative_path):
+    """兼容 PyInstaller 运行模式和源码运行模式下的资源文件路径"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的临时目录
+        base_path = sys._MEIPASS
+    else:
+        # 开发环境下
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
-
-def load_json(path="config.json"):
+config_path = resource_path('config.json')
+def load_json(path=config_path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -211,7 +220,8 @@ root = tk.Tk()
 root.title('电子元器件管理Electronic Component Storage Management System')
 
 try:
-    logo_img = Image.open(os.path.join('src', 'sysimg', 'logo.png'))
+    logoimg_path = resource_path('src/sysimg/logo.png')
+    logo_img = Image.open(logoimg_path)
     logo_tk = ImageTk.PhotoImage(logo_img)
     root.iconphoto(True, logo_tk)
 except Exception as e:
